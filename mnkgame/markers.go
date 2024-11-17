@@ -4,9 +4,11 @@ package mnkgame
 type Marker string
 
 const (
-	filledBlackCircle = "⬤" // U+2B24 Black Large Circle
-	filledWhiteCircle = "◯" // U+25EF Large Circle
-	blackX            = "🗙" // U+1F5D9 Cancellation X
+	filledBlackCircle = "⬤" // U+2B24 BLACK LARGE CIRCLE
+	//filledBlackCircle = "⚫" // U+26AB MEDIUM BLACK CIRCLE
+	filledWhiteCircle = "⭘" // U+2B58 HEAVY CIRCLE
+	blackX            = "🗙" // U+1F5D9 CANCELLATION X
+
 )
 
 // Predefine some markers.
