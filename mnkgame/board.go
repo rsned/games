@@ -6,6 +6,8 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
+	"unicode/utf8"
 )
 
 // Board represents the cells and their states comprising an m-n-k game.
@@ -108,8 +110,8 @@ func (b *Board) SetLabels(rowLabels, colLabels []string) {
 	b.rowLabelSize = 0
 	for i, v := range b.rowLabels {
 		b.rowLabelMap[v] = i
-		if len(v) > b.rowLabelSize {
-			b.rowLabelSize = len(v)
+		if utf8.RuneCountInString(v) > b.rowLabelSize {
+			b.rowLabelSize = utf8.RuneCountInString(v)
 		}
 	}
 
@@ -197,12 +199,19 @@ func (b *Board) OpenPositions() []string {
 	return open
 }
 
-const (
-	cellBorder = lineHorizontal + lineHorizontal + lineHorizontal
-)
+// BoardOptions packages up the various settings used when rendering the game board.
+type BoardOptions struct {
+	HasOuterBorder bool // Should there be a line around the labels outside the main board.
+	HasInnerBorder bool // Should there be a line around the main board area.
+	HasInnerGrid   bool // Should we render the lines separating each row and column.
+	HasLabels      bool // Do we have labels to show.
+	LabelWidth     int  // Width of longest label to be displayed.
+	MarkerWidth    int  // Width of the widest player marker symbol.
+	Padding        int  // Amount of whitespace on either side of labels and markers.
+}
 
-// Board border and separator tokens.
-// See https://en.wikipedia.org/wiki/Box_Drawing  for more symbols.
+// Various board border and separator tokens.
+// See https://en.wikipedia.org/wiki/Box_Drawing for more symbols.
 const (
 	cornerTopLeft          = "┌"
 	cornerTopLeftThick     = "┏"
@@ -226,6 +235,13 @@ const (
 	teeUpThick             = "┻"
 	teeDown                = "┬"
 	teeDownThick           = "┳"
+
+	// whiteSpace is a block of text we can substring from.
+	whiteSpace = "                                            "
+)
+
+var (
+	cellBorder = []rune(strings.Repeat(lineHorizontal, 20))
 )
 
 var (
@@ -238,217 +254,327 @@ var (
 // state dump of the instance.
 func (b *Board) String() string {
 
-	return b.renderBoard()
+	return b.renderBoard(nil)
 }
 
-func (b *Board) renderBoard() string {
-	var buf bytes.Buffer
-
-	const cellWidth = 3
-	boardWidth := b.cols*cellWidth /* cell contents */ +
-		(b.cols - 1) /* innerGrid */ +
-		2 /* inner border */ +
-		2 /* outer border */ +
-		(2 * 3) /* label width */
-
-	// If has outer border.
-	if _, ok := boardCache["topOuterBorder"]; !ok {
-		tob := cornerTopLeftThick +
-			strings.Repeat(lineHorizontalThick, boardWidth-2) +
-			cornerTopRightThick +
-			"\n"
-		boardCache["topOuterBorder"] = tob
+// generateStaticElements computes the dimensions of the board and renders
+// the parts of the board that don't change every iteration for the rendering
+// throughout the remainder of the run.
+func (b *Board) generateStaticElements(bo *BoardOptions) {
+	// Figure out the overall width of the output starting with the number of
+	// columns plus padding on either side.
+	boardWidth := b.cols * (bo.MarkerWidth + 2*bo.Padding)
+	if bo.HasOuterBorder {
+		boardWidth += utf8.RuneCountInString(cornerTopLeftThick) +
+			utf8.RuneCountInString(cornerTopRightThick)
 	}
-	buf.WriteString(boardCache["topOuterBorder"])
+	if bo.HasInnerBorder {
+		boardWidth += utf8.RuneCountInString(cornerTopLeft) +
+			utf8.RuneCountInString(cornerTopRight)
+	}
+	if bo.HasInnerGrid {
+		boardWidth += (b.cols - 1) * utf8.RuneCountInString(lineVertical)
+	}
+	if bo.HasLabels {
+		// Add spacing to left and right sides of the board.
+		boardWidth += 2 * (bo.LabelWidth + 2*bo.Padding)
+	}
 
-	if b.hasLabels {
-		if _, ok := boardCache["colLabels"]; !ok {
-			var rowBuf bytes.Buffer
-			// If has outer border
-			rowBuf.WriteString(lineVerticalThick)
-			// Row label padding
-			if b.hasLabels {
-				rowBuf.WriteString("   ")
-			}
-			// Inner border padding
+	// -----------------------------------------------
+	// Top and bottom outer border
+	// -----------------------------------------------
+
+	tob := cornerTopLeftThick +
+		strings.Repeat(lineHorizontalThick, boardWidth-2) +
+		cornerTopRightThick +
+		"\n"
+	boardCache["topOuterBorder"] = tob
+
+	bob := cornerBottomLeftThick +
+		strings.Repeat(lineHorizontalThick, boardWidth-2) +
+		cornerBottomRightThick +
+		"\n"
+	boardCache["botOuterBorder"] = bob
+
+	// -----------------------------------------------
+	// Top and bottom labels
+	// -----------------------------------------------
+
+	var rowBuf bytes.Buffer
+	// If has outer border
+	if bo.HasOuterBorder {
+		rowBuf.WriteString(lineVerticalThick)
+	}
+	// Row label padding
+	if bo.HasLabels {
+		rowBuf.WriteString(whiteSpace[0 : bo.LabelWidth+2*bo.Padding])
+	}
+	// Inner border padding
+	if bo.HasInnerBorder {
+		rowBuf.WriteString(" ")
+	}
+	for i, col := range b.colLabels {
+		rowBuf.WriteString(fmt.Sprintf("%s%s%s", whiteSpace[0:bo.Padding],
+			col, whiteSpace[0:bo.Padding]))
+		if bo.HasInnerGrid && i != b.cols-1 {
 			rowBuf.WriteString(" ")
-			for i, col := range b.colLabels {
-				rowBuf.WriteString(fmt.Sprintf(" %s ", col))
-				// If has inner grid
-				if i != b.cols-1 {
-					rowBuf.WriteString(" ")
+		}
+	}
+	// Inner border padding
+	if bo.HasInnerBorder {
+		rowBuf.WriteString(" ")
+	}
+	// Row label padding
+	if bo.HasLabels {
+		rowBuf.WriteString(whiteSpace[0 : bo.LabelWidth+2*bo.Padding])
+	}
+	// If has outer border
+	if bo.HasOuterBorder {
+		rowBuf.WriteString(lineVerticalThick)
+	}
+	rowBuf.WriteString("\n")
+	boardCache["colLabels"] = rowBuf.String()
+
+	// -----------------------------------------------
+	// Top and bottom inner borders
+	// -----------------------------------------------
+
+	rowBuf.Reset()
+	if bo.HasOuterBorder {
+		rowBuf.WriteString(lineVerticalThick)
+	}
+	if bo.HasLabels {
+		rowBuf.WriteString(whiteSpace[0 : bo.LabelWidth+2*bo.Padding])
+	}
+
+	// If has inner border
+	if bo.HasInnerBorder {
+		rowBuf.WriteString(cornerTopLeft)
+	}
+
+	for i := range b.cols {
+		if bo.HasInnerBorder {
+			rowBuf.WriteString(string(cellBorder[0:(bo.MarkerWidth + 2*bo.Padding)]))
+		} else {
+			rowBuf.WriteString(whiteSpace[0 : bo.MarkerWidth+2*bo.Padding])
+		}
+		if i != b.cols-1 {
+			if bo.HasInnerBorder {
+				if bo.HasInnerGrid {
+					rowBuf.WriteString(teeDown)
+				} else {
+					rowBuf.WriteString(lineHorizontal)
 				}
 			}
-			// Inner border padding
-			rowBuf.WriteString(" ")
-			// Row label padding
-			if b.hasLabels {
-				rowBuf.WriteString("   ")
-			}
-			// If has outer border
-			rowBuf.WriteString(lineVerticalThick)
-			rowBuf.WriteString("\n")
-			boardCache["colLabels"] = rowBuf.String()
 		}
+	}
+
+	if bo.HasInnerBorder {
+		rowBuf.WriteString(cornerTopRight)
+	}
+
+	if bo.HasLabels {
+		rowBuf.WriteString(whiteSpace[0 : bo.LabelWidth+2*bo.Padding])
+	}
+
+	if bo.HasOuterBorder {
+		rowBuf.WriteString(lineVerticalThick)
+	}
+
+	rowBuf.WriteString("\n")
+
+	boardCache["topInnerBorder"] = rowBuf.String()
+
+	// Bottom inner border
+	rowBuf.Reset()
+	if bo.HasOuterBorder {
+		rowBuf.WriteString(lineVerticalThick)
+	}
+	if bo.HasLabels {
+		rowBuf.WriteString(whiteSpace[0 : bo.LabelWidth+2*bo.Padding])
+	}
+
+	// If has inner border
+	if bo.HasInnerBorder {
+		rowBuf.WriteString(cornerBottomLeft)
+	}
+
+	for i := range b.cols {
+		if bo.HasInnerBorder {
+			rowBuf.WriteString(string(cellBorder[0:(bo.MarkerWidth + 2*bo.Padding)]))
+		} else {
+			rowBuf.WriteString(whiteSpace[0 : bo.MarkerWidth+2*bo.Padding])
+		}
+		if i != b.cols-1 {
+			if bo.HasInnerBorder {
+				if bo.HasInnerGrid {
+					rowBuf.WriteString(teeUp)
+				} else {
+					rowBuf.WriteString(lineHorizontal)
+				}
+			} else {
+				rowBuf.WriteString(" ")
+			}
+		}
+	}
+
+	if bo.HasInnerBorder {
+		rowBuf.WriteString(cornerBottomRight)
+	}
+
+	if bo.HasLabels {
+		rowBuf.WriteString(whiteSpace[0 : bo.LabelWidth+2*bo.Padding])
+	}
+
+	if bo.HasOuterBorder {
+		rowBuf.WriteString(lineVerticalThick)
+	}
+
+	rowBuf.WriteString("\n")
+
+	boardCache["bottomInnerBorder"] = rowBuf.String()
+
+	// -----------------------------------------------
+	// Inner grid separator lines
+	// -----------------------------------------------
+
+	// TODO(rsned): To allow for vertical padding, generate the same row without
+	// the marker values added in.
+
+	rowBuf.Reset()
+	// If has outer border
+	if bo.HasOuterBorder {
+		rowBuf.WriteString(lineVerticalThick)
+	}
+	if bo.HasLabels {
+		rowBuf.WriteString(whiteSpace[0 : bo.LabelWidth+2*bo.Padding])
+	}
+
+	for i := range b.cols {
+		switch i {
+		case 0: // Opening cell of the line.
+
+			if bo.HasInnerBorder {
+				if bo.HasInnerGrid {
+					rowBuf.WriteString(teeLeft)
+				} else {
+					rowBuf.WriteString(lineVertical)
+				}
+			}
+			rowBuf.WriteString(string(cellBorder[0:(bo.MarkerWidth + 2*bo.Padding)]))
+			rowBuf.WriteString(cross)
+		case b.cols - 1: // Closing cell of the line.
+
+			rowBuf.WriteString(string(cellBorder[0:(bo.MarkerWidth + 2*bo.Padding)]))
+
+			if bo.HasInnerBorder {
+				if bo.HasInnerGrid {
+					rowBuf.WriteString(teeRight)
+				} else {
+					rowBuf.WriteString(lineVertical)
+				}
+			}
+		default:
+			// Inner cells along the separator row are basically "---+"
+			if bo.HasInnerGrid {
+				rowBuf.WriteString(string(cellBorder[0:(bo.MarkerWidth + 2*bo.Padding)]))
+				rowBuf.WriteString(cross)
+			}
+		}
+	}
+
+	if bo.HasLabels {
+		rowBuf.WriteString(whiteSpace[0 : bo.LabelWidth+2*bo.Padding])
+	}
+
+	if bo.HasOuterBorder {
+		rowBuf.WriteString(lineVerticalThick)
+	}
+	rowBuf.WriteString("\n")
+	boardCache["innerSeparator"] = rowBuf.String()
+
+}
+
+func (b *Board) renderBoard(bo *BoardOptions) string {
+	if bo == nil {
+		bo = &BoardOptions{
+			HasOuterBorder: true,
+			HasInnerBorder: true,
+			HasInnerGrid:   true,
+			HasLabels:      b.hasLabels,
+			LabelWidth:     b.rowLabelSize,
+			MarkerWidth:    1,
+			Padding:        4,
+		}
+	}
+
+	var once sync.Once
+	once.Do(func() { b.generateStaticElements(bo) })
+	var buf bytes.Buffer
+
+	if bo.HasOuterBorder {
+		buf.WriteString(boardCache["topOuterBorder"])
+	}
+
+	if bo.HasLabels {
 		buf.WriteString(boardCache["colLabels"])
 	}
 
 	// If has inner border
-	// Top inner border row
-	if _, ok := boardCache["topInnerBorder"]; !ok {
-		var rowBuf bytes.Buffer
-		// If has outer border
-		rowBuf.WriteString(lineVerticalThick)
-		if b.hasLabels {
-			rowBuf.WriteString("   ")
-		}
-
-		// If has inner border
-		rowBuf.WriteString(cornerTopLeft)
-
-		for i := range b.cols {
-			rowBuf.WriteString(cellBorder)
-			// If has inner grid
-			if i != b.cols-1 {
-				rowBuf.WriteString(teeDown)
-				// } else {
-				// rowBuf.WriteString(lineHorizontal)
-				// }
-			}
-		}
-		rowBuf.WriteString(cornerTopRight)
-
-		if b.hasLabels {
-			rowBuf.WriteString("   ")
-		}
-		// If has outer border
-		rowBuf.WriteString(lineVerticalThick)
-		rowBuf.WriteString("\n")
-		boardCache["topInnerBorder"] = rowBuf.String()
+	if bo.HasInnerBorder {
+		buf.WriteString(boardCache["topInnerBorder"])
 	}
 
-	// If has inner border
-	buf.WriteString(boardCache["topInnerBorder"])
-
 	// Main board elements
-
 	for i, row := range b.cells {
-		// If has outer border
-		buf.WriteString(lineVerticalThick)
-		if b.hasLabels {
-			buf.WriteString(fmt.Sprintf(" %s ", b.rowLabels[i]))
+		if bo.HasOuterBorder {
+			buf.WriteString(lineVerticalThick)
 		}
-
-		// If has inner border
-		buf.WriteString(lineVertical)
+		if bo.HasLabels {
+			buf.WriteString(fmt.Sprintf("%s%s%s", whiteSpace[0:bo.Padding],
+				b.rowLabels[i], whiteSpace[0:bo.Padding]))
+		}
+		if bo.HasInnerBorder {
+			buf.WriteString(lineVertical)
+		}
 
 		// For each active cell in this row of the board
 		for i, col := range row {
-			buf.WriteString(fmt.Sprintf(" %s ", col))
+			buf.WriteString(fmt.Sprintf("%s%s%s", whiteSpace[0:bo.Padding],
+				col, whiteSpace[0:bo.Padding]))
 			if i != b.cols-1 {
-				buf.WriteString(lineVertical)
+				if bo.HasInnerGrid {
+					buf.WriteString(lineVertical)
+				}
 			}
 		}
 
-		// If has inner border.
-		buf.WriteString(lineVertical)
-
-		// If has labels.
-		if b.hasLabels {
-			buf.WriteString("   ")
+		if bo.HasInnerBorder {
+			buf.WriteString(lineVertical)
 		}
-		// If has outer border
-		buf.WriteString(lineVerticalThick)
+		if bo.HasLabels {
+			buf.WriteString(whiteSpace[0 : bo.LabelWidth+2*bo.Padding])
+		}
+		if bo.HasOuterBorder {
+			buf.WriteString(lineVerticalThick)
+		}
 		buf.WriteString("\n")
 
-		if i == b.cols-1 {
-			// Bottom inner border row
-			if _, ok := boardCache["bottomInnerBorder"]; !ok {
-				var rowBuf bytes.Buffer
-				// If has outer border
-				rowBuf.WriteString(lineVerticalThick)
-				if b.hasLabels {
-					rowBuf.WriteString("   ")
-				}
-				// If has inner border
-				rowBuf.WriteString(cornerBottomLeft)
-
-				for i := range b.cols {
-					rowBuf.WriteString(cellBorder)
-					// If has inner grid
-					if i != b.cols-1 {
-						rowBuf.WriteString(teeUp)
-						// } else {
-						// rowBuf.WriteString(lineHorizontal)
-						// }
-					}
-				}
-				rowBuf.WriteString(cornerBottomRight)
-
-				if b.hasLabels {
-					rowBuf.WriteString("   ")
-				}
-				// If has outer border
-				rowBuf.WriteString(lineVerticalThick)
-				rowBuf.WriteString("\n")
-				boardCache["bottomInnerBorder"] = rowBuf.String()
-			}
+		if bo.HasInnerGrid && i != b.cols-1 {
+			buf.WriteString(boardCache["innerSeparator"])
+		}
+		if i == b.cols-1 && bo.HasInnerBorder {
 			buf.WriteString(boardCache["bottomInnerBorder"])
-			break
 		}
-
-		// If has inner grid lines
-		if _, ok := boardCache["innerSeparator"]; !ok {
-			var rowBuf bytes.Buffer
-			// If has outer border
-			rowBuf.WriteString(lineVerticalThick)
-			if b.hasLabels {
-				rowBuf.WriteString("   ")
-			}
-
-			for i := range row {
-				switch i {
-				case 0:
-					// If has inner border AND NOT is last row
-					rowBuf.WriteString(teeLeft)
-					rowBuf.WriteString(cellBorder)
-					rowBuf.WriteString(cross)
-				case b.cols - 1:
-					// If has inner border AND NOT is last row
-					rowBuf.WriteString(cellBorder)
-					rowBuf.WriteString(teeRight)
-				default:
-					rowBuf.WriteString(cellBorder)
-					rowBuf.WriteString(cross)
-				}
-			}
-
-			if b.hasLabels {
-				rowBuf.WriteString("   ")
-			}
-			// If has outer border
-			rowBuf.WriteString(lineVerticalThick)
-			rowBuf.WriteString("\n")
-			boardCache["innerSeparator"] = rowBuf.String()
-		}
-		// If has inner grid lines
-		buf.WriteString(boardCache["innerSeparator"])
 	}
 
-	if b.hasLabels {
+	if bo.HasLabels {
 		buf.WriteString(boardCache["colLabels"])
 	}
 
-	// If has outer border.
-	if _, ok := boardCache["botOuterBorder"]; !ok {
-		tob := cornerBottomLeftThick +
-			strings.Repeat(lineHorizontalThick, boardWidth-2) +
-			cornerBottomRightThick +
-			"\n"
-		boardCache["botOuterBorder"] = tob
+	if bo.HasOuterBorder {
+		buf.WriteString(boardCache["botOuterBorder"])
 	}
-	// If has outer border
-	buf.WriteString(boardCache["botOuterBorder"])
 
 	return buf.String()
 }
