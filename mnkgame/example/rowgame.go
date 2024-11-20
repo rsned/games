@@ -84,9 +84,12 @@ type playFunc func(*mnkgame.Player, *mnkgame.MNKGame) string
 
 func humanPlayer(player *mnkgame.Player, game *mnkgame.MNKGame) string {
 	moves := game.PotentialMoves()
+	// TODO(rsned): As a feature request, differentiate between bad
+	// text input (e.g., "TR" vs "2qq123uu*)AS", and position already
+	// taken (e.g. player 2 enters the postion of where player 1 just
+	// played.)
 	move := readInput(fmt.Sprintf("Select square: %+v", moves), moves)
 	return move
-
 }
 
 func randomPlayer(player *mnkgame.Player, games *mnkgame.MNKGame) string {
